@@ -3,8 +3,15 @@ import type { RequestInit } from "node-fetch";
 import fetch, { FetchError } from "node-fetch";
 import https from "node:https";
 
+import { join } from "node:path";
+import { platform } from "node:os";
+import { exec } from "node:child_process";
+import { promisify } from "node:util";
+
 import { Toast, getPreferenceValues, open, showHUD, showInFinder, showToast } from "@raycast/api";
 import { runAppleScript } from "@raycast/utils";
+
+const execAsync = promisify(exec);
 
 import type { BookEntry } from "@/types";
 import type { LibgenPreferences } from "@/types";
@@ -95,20 +102,22 @@ export const fileNameWithExtensionFromBookEntry = (book: BookEntry) => {
 };
 
 export function buildFileName(path: string, name: string, extension: string) {
-  const directoryExists = fse.existsSync(path + name + "." + extension);
+  const baseName = `${name}.${extension}`;
+  const filePath = join(path, baseName);
+  const directoryExists = fse.existsSync(filePath);
+
   if (!directoryExists) {
-    return name + "." + extension;
+    return baseName;
   } else {
     let index = 2;
-    while (directoryExists) {
-      const newName = name + "-" + index + "." + extension;
-      const directoryExists = fse.existsSync(path + newName);
-      if (!directoryExists) {
+    while (true) {
+      const newName = `${name}-${index}.${extension}`;
+      const newPath = join(path, newName);
+      if (!fse.existsSync(newPath)) {
         return newName;
       }
       index++;
     }
-    return name + "-" + index + "." + extension;
   }
 }
 
@@ -165,20 +174,91 @@ export async function downloadBookToDefaultDirectory(url = "", book: BookEntry) 
   }
 }
 
+async function chooseDownloadFolder(): Promise<string | null> {
+  const currentPlatform = platform();
+  if (currentPlatform === "darwin") {
+    try {
+      return (
+        await runAppleScript(`
+        set outputFolder to choose folder with prompt "Please select an output folder:"
+        return POSIX path of outputFolder
+      `)
+      ).trim();
+    } catch (e) {
+      return null;
+    }
+  } else if (currentPlatform === "win32") {
+    try {
+      const psCommand = `
+        Add-Type -AssemblyName System.Windows.Forms
+        $f = New-Object System.Windows.Forms.FolderBrowserDialog
+        $f.Description = "Select Download Folder"
+        $f.ShowNewFolderButton = $true
+        if ($f.ShowDialog() -eq "OK") { Write-Host $f.SelectedPath -NoNewline }
+      `;
+      const { stdout } = await execAsync(`powershell -NoProfile -Command "${psCommand.replace(/"/g, '\\"')}"`);
+      return stdout.trim() || null;
+    } catch (e) {
+      console.error("Folder picker error:", e);
+      return null;
+    }
+  }
+  return null;
+}
+
 export async function downloadBookToLocation(url = "", book: BookEntry) {
-  const fileName = fileNameWithExtensionFromBookEntry(book);
-  await showToast(Toast.Style.Animated, "Please pick a folder...");
+  const name = fileNameFromBookEntry(book);
+  const extension = book.extension.toLowerCase();
+
+  // 1. Pick Folder
+  const outputFolder = await chooseDownloadFolder();
+  if (!outputFolder) {
+    return; // User cancelled
+  }
+
+  // 2. Download
+  const toast = await showActionToast({
+    title: "Downloading...",
+    cancelable: true,
+  });
+
   try {
-    await runAppleScript(`
-      set outputFolder to choose folder with prompt "Please select an output folder:"
-      set temp_folder to (POSIX path of outputFolder) & "${fileName}"
-      set q_temp_folder to quoted form of temp_folder
-      set cmd to "curl -o " & q_temp_folder & " " & "${url}"
-        do shell script cmd
-    `);
-    await showHUD("Download Complete.");
+    const fileName = buildFileName(outputFolder, name, extension);
+    const filePath = join(outputFolder, fileName);
+
+    const arrayBuffer = await fetchImageArrayBuffer(url, toast.signal);
+    fse.writeFileSync(filePath, Buffer.from(arrayBuffer));
+
+    const options: Toast.Options = {
+      style: Toast.Style.Success,
+      title: "Success!",
+      message: `Saved to ${fileName}`,
+      primaryAction: {
+        title: "Open Book",
+        onAction: (toast) => {
+          open(filePath);
+          toast.hide();
+        },
+      },
+      secondaryAction: {
+        title: "Show in finder",
+        onAction: (toast) => {
+          showInFinder(filePath);
+          toast.hide();
+        },
+      },
+    };
+    await showToast(options);
   } catch (err) {
-    console.error(err);
-    await showHUD("Download Failed. Try with a different download gateway.");
+    if (err instanceof FetchError && err.code === "CERT_HAS_EXPIRED") {
+      await showFailureToast(
+        "Download Failed",
+        new Error(
+          "The certificate has expired. Try with a different download gateway or enable 'Ignore HTTPS Errors' in your settings.",
+        ),
+      );
+      return;
+    }
+    await showFailureToast("Download Failed", err as Error);
   }
 }

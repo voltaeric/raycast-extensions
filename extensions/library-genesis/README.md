@@ -1,3 +1,16 @@
+
+Summary of Changes
+Platform Support: Enabled Windows support in 
+package.json
+.
+Download Logic: Replaced macOS curl script with native Node.js 
+fetch
+ and fs for cross-platform downloading.
+Folder Selection: Implemented a PowerShell-based FolderBrowserDialog to replace the AppleScript folder picker on Windows.
+Path Handling: Updated file path construction to be OS-agnostic using path.join.
+
+
+
 <p align="center">
   <img src="https://raw.githubusercontent.com/yz3440/extensions/main/extensions/library-genesis/assets/command-icon.png" height="128" width="128">
   <h1 align="center">Library Genesis</h1>
